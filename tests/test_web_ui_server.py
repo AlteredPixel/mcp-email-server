@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.metadata
 import io
+import socket
+import sys
 from unittest.mock import MagicMock
 
 import click
@@ -42,6 +44,71 @@ def test_ui_cli_exposes_only_no_open_and_port(monkeypatch) -> None:
     assert result.exit_code == 0
     run.assert_called_once_with(no_open=True, port=0)
     assert options == {"--no-open", "--port"}
+
+
+class _RecordingListener:
+    def __init__(self, family: int, kind: int) -> None:
+        self.options: list[tuple[int, int, int]] = []
+        self.bound: tuple[str, int] | None = None
+
+    def setsockopt(self, level: int, option: int, value: int) -> None:
+        self.options.append((level, option, value))
+
+    def bind(self, address: tuple[str, int]) -> None:
+        self.bound = address
+
+    def listen(self, backlog: int) -> None:
+        pass
+
+    def set_inheritable(self, inheritable: bool) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def _record_listener_options(monkeypatch: pytest.MonkeyPatch, platform: str) -> _RecordingListener:
+    created: list[_RecordingListener] = []
+
+    def create(family: int, kind: int) -> _RecordingListener:
+        listener = _RecordingListener(family, kind)
+        created.append(listener)
+        return listener
+
+    monkeypatch.setattr(server_module.sys, "platform", platform)
+    monkeypatch.setattr(server_module.socket, "socket", create)
+    server_module._bound_socket(0)
+    assert len(created) == 1
+    assert created[0].bound == ("127.0.0.1", 0)
+    return created[0]
+
+
+def test_windows_listener_uses_exclusive_address_and_never_reuse(monkeypatch) -> None:
+    exclusive = -5
+    monkeypatch.setattr(server_module.socket, "SO_EXCLUSIVEADDRUSE", exclusive, raising=False)
+
+    listener = _record_listener_options(monkeypatch, "win32")
+
+    assert listener.options == [(server_module.socket.SOL_SOCKET, exclusive, 1)]
+    assert all(option != server_module.socket.SO_REUSEADDR for _, option, _ in listener.options)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Requires native Windows socket semantics")
+def test_windows_listener_rejects_competing_address_reuse() -> None:
+    with server_module._bound_socket(0) as listener:
+        assert listener.getsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE) == 1
+        assert listener.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == 0
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as competitor:
+            competitor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            with pytest.raises(OSError) as error:
+                competitor.bind(listener.getsockname())
+            assert error.value.winerror in {10013, 10048}  # WSAEACCES or WSAEADDRINUSE
+
+
+def test_posix_listener_keeps_address_reuse(monkeypatch) -> None:
+    listener = _record_listener_options(monkeypatch, "linux")
+
+    assert listener.options == [(server_module.socket.SOL_SOCKET, server_module.socket.SO_REUSEADDR, 1)]
 
 
 def test_server_prebinds_exact_ipv4_loopback_opens_fragment_and_hides_token(monkeypatch, capsys) -> None:
