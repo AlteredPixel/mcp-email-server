@@ -688,7 +688,11 @@ execute.
 The separate `attachments` parameter on `send_email` and `save_to_mailbox`
 reads local file paths. Relative paths are likewise resolved against the server
 process's working directory. Only connect clients that should be trusted to
-request access to files visible to that process.
+request access to files visible to that process. Requests rejected by account,
+send-capability (for `send_email`), or recipient-allowlist checks never open,
+stat, or resolve caller-supplied attachment paths, including UNC or network
+paths. Once those checks pass, attachment size or file-access validation may
+still reject the request after filesystem access.
 
 ## TLS certificate verification
 
