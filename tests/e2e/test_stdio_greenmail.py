@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from email import policy
 from email.message import EmailMessage, Message
 from email.parser import BytesParser
-from email.utils import make_msgid
+from email.utils import getaddresses, make_msgid
 from pathlib import Path
 from typing import Any
 
@@ -1069,11 +1069,163 @@ async def test_recipient_globs_against_greenmail(tmp_path: Path, pattern: str) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("grants", [None, [], ["draft"], ["send"], ["append"], ["append", "delete"], ["organize"]])
+async def test_account_mutation_grants_against_greenmail(tmp_path: Path, grants: list[str] | None) -> None:
+    """Keep read/write defaults while account restrictions govern real effects."""
+    _wait_until_ready()
+    _ensure_empty_mailboxes(ALICE, ["INBOX", "Drafts", "Sent", "Junk"])
+    _ensure_empty_mailboxes(BOB, ["INBOX"])
+    subject = f"mutation-grants-{uuid.uuid4().hex}"
+    _seed_message_as(BOB, ALICE[0], subject, "Synthetic source")
+    source = _wait_for_message(ALICE, "INBOX", subject)
+    account_fields = 'drafts_mailbox = "Drafts"\n'
+    if grants is not None:
+        account_fields += f"allowed_mutations = {json.dumps(grants)}\n"
+    config = CONFIG_TEMPLATE.replace('account_name = "alice"\n', f'account_name = "alice"\n{account_fields}')
+    # A non-empty account override replaces even a read-only global policy.
+    if grants is not None:
+        config = "allowed_mutations = []\n" + config
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(config)
+    config_path.chmod(0o600)
+    server_env = {key: value for key, value in os.environ.items() if not key.startswith("MCP_EMAIL_SERVER_")}
+    server_env.update({
+        "MCP_EMAIL_SERVER_CONFIG_PATH": str(config_path),
+        "MCP_EMAIL_SERVER_LOG_LEVEL": "WARNING",
+    })
+    server = StdioServerParameters(
+        command=str(Path(sys.executable).with_name("mcp-email-server")),
+        args=["stdio"],
+        env=server_env,
+        cwd=Path.cwd(),
+    )
+    async with stdio_client(server) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=15)) as session:
+            await session.initialize()
+            tool_names = {tool.name for tool in (await session.list_tools()).tools}
+            assert {"save_draft", "save_to_mailbox", "send_email", "set_email_flags"} <= tool_names
+            assert (await _metadata_for_subject(session, "alice", subject))["email_id"] == source.uid
+
+            draft_subject = f"draft-{subject}"
+            draft = await session.call_tool(
+                "save_draft",
+                arguments={"account_name": "alice", "subject": draft_subject, "body": "Recipientless draft"},
+            )
+            if grants is None or "draft" in grants:
+                assert draft.isError is not True, _text_content(draft)
+                observed = _wait_for_message(ALICE, "Drafts", draft_subject)
+                assert r"\Draft" in observed.flags
+                assert not any(address for _, address in getaddresses(observed.message.get_all("To", [])))
+            else:
+                assert draft.isError is True
+                assert _find_message(ALICE, "Drafts", draft_subject) is None
+
+            send_subject = f"send-{subject}"
+            sent = await session.call_tool(
+                "send_email",
+                arguments={
+                    "account_name": "alice",
+                    "recipients": [BOB[0]],
+                    "subject": send_subject,
+                    "body": "A send-only grant also permits this Sent copy",
+                },
+            )
+            if grants is None or "send" in grants:
+                assert sent.isError is not True, _text_content(sent)
+                _wait_for_message(BOB, "INBOX", send_subject)
+                _wait_for_message(ALICE, "Sent", send_subject)
+            else:
+                assert sent.isError is True
+                assert _find_message(BOB, "INBOX", send_subject) is None
+                assert _find_message(ALICE, "Sent", send_subject) is None
+
+            append_subject = f"append-{subject}"
+            appended = await session.call_tool(
+                "save_to_mailbox",
+                arguments={
+                    "account_name": "alice",
+                    "recipients": [BOB[0]],
+                    "subject": append_subject,
+                    "body": "General append",
+                    "mailbox": "INBOX",
+                },
+            )
+            marked = await session.call_tool(
+                "set_email_flags",
+                arguments={"account_name": "alice", "email_ids": [source.uid], "operation": "add", "flags": [r"\Seen"]},
+            )
+            if grants is None or "append" in grants:
+                assert appended.isError is not True, _text_content(appended)
+                _wait_for_message(ALICE, "INBOX", append_subject)
+            else:
+                assert appended.isError is True
+                assert _find_message(ALICE, "INBOX", append_subject) is None
+            if grants is None or "organize" in grants:
+                assert marked.isError is not True, _text_content(marked)
+                assert r"\Seen" in _wait_for_message(ALICE, "INBOX", subject).flags
+            else:
+                assert marked.isError is True
+                assert r"\Seen" not in _wait_for_message(ALICE, "INBOX", subject).flags
+
+            deleted_subject = f"deleted-append-{subject}"
+            deleted_append = await session.call_tool(
+                "save_to_mailbox",
+                arguments={
+                    "account_name": "alice",
+                    "recipients": [BOB[0]],
+                    "subject": deleted_subject,
+                    "body": "Only this new message receives the Deleted flag",
+                    "mailbox": "INBOX",
+                    "flags": [r"\Deleted"],
+                },
+            )
+            if grants is None or {"append", "delete"} <= set(grants):
+                assert deleted_append.isError is not True, _text_content(deleted_append)
+                assert r"\Deleted" in _wait_for_message(ALICE, "INBOX", deleted_subject).flags
+            else:
+                assert deleted_append.isError is True
+                assert _find_message(ALICE, "INBOX", deleted_subject) is None
+            assert r"\Deleted" not in _wait_for_message(ALICE, "INBOX", subject).flags
+
+            moved = await session.call_tool(
+                "move_emails",
+                arguments={
+                    "account_name": "alice",
+                    "email_ids": [source.uid],
+                    "source_mailbox": "INBOX",
+                    "destination_role": "junk",
+                },
+            )
+            if grants is None or "organize" in grants:
+                assert moved.isError is not True, _text_content(moved)
+                assert _find_message(ALICE, "INBOX", subject) is None
+                _wait_for_message(ALICE, "Junk", subject)
+                junk_metadata = await _metadata_for_subject_in_mailbox(session, "alice", "Junk", subject)
+                restored = await _call_tool(
+                    session,
+                    "move_emails",
+                    {
+                        "account_name": "alice",
+                        "email_ids": [junk_metadata["email_id"]],
+                        "source_mailbox": "Junk",
+                        "destination_mailbox": "INBOX",
+                    },
+                )
+                assert restored["result"] == "Successfully moved 1 email(s) to INBOX"
+                assert _find_message(ALICE, "Junk", subject) is None
+                _wait_for_message(ALICE, "INBOX", subject)
+            else:
+                assert moved.isError is True
+                assert _find_message(ALICE, "Junk", subject) is None
+                assert _wait_for_message(ALICE, "INBOX", subject).uid == source.uid
+
+
+@pytest.mark.asyncio
 async def test_current_stdio_server_against_greenmail(tmp_path: Path) -> None:
     """Exercise the current public MCP/CLI/config boundary against real mail sockets."""
     _wait_until_ready()
     _ensure_empty_mailboxes(ALICE, ["INBOX", "Sent", "Drafts", "Archive"])
-    _ensure_empty_mailboxes(BOB, ["INBOX", "Drafts", "Archive"])
+    _ensure_empty_mailboxes(BOB, ["INBOX", "Drafts", "Archive", "Junk"])
 
     run_id = uuid.uuid4().hex
     sent_subject = f"mcp-e2e-send-{run_id}"
@@ -1413,6 +1565,40 @@ async def test_current_stdio_server_against_greenmail(tmp_path: Path) -> None:
             assert archive_result["result"] == "Successfully archived 1 email(s) to Archive"
             assert _find_message(BOB, "INBOX", archive_subject) is None
             _wait_for_message(BOB, "Archive", archive_subject)
+
+            junk_subject = f"mcp-e2e-junk-{run_id}"
+            _seed_message(junk_subject, "Move this message to Junk and restore it")
+            original = _wait_for_message(BOB, "INBOX", junk_subject)
+            junk_metadata = await _metadata_for_subject(session, "bob", junk_subject)
+            assert junk_metadata["email_id"] == original.uid
+            junk_result = await _call_tool(
+                session,
+                "move_emails",
+                {
+                    "account_name": "bob",
+                    "email_ids": [junk_metadata["email_id"]],
+                    "source_mailbox": "INBOX",
+                    "destination_role": "junk",
+                },
+            )
+            assert junk_result["result"] == "Successfully moved 1 email(s) to Junk"
+            assert _find_message(BOB, "INBOX", junk_subject) is None
+            _wait_for_message(BOB, "Junk", junk_subject)
+            # MOVE assigns destination-scoped UIDs; re-list before restoring.
+            restore_metadata = await _metadata_for_subject_in_mailbox(session, "bob", "Junk", junk_subject)
+            restore_result = await _call_tool(
+                session,
+                "move_emails",
+                {
+                    "account_name": "bob",
+                    "email_ids": [restore_metadata["email_id"]],
+                    "source_mailbox": "Junk",
+                    "destination_mailbox": "INBOX",
+                },
+            )
+            assert restore_result["result"] == "Successfully moved 1 email(s) to INBOX"
+            assert _find_message(BOB, "Junk", junk_subject) is None
+            _wait_for_message(BOB, "INBOX", junk_subject)
 
             draft_subject = f"mcp-e2e-draft-{run_id}"
             draft_body = "Draft body created through MCP"

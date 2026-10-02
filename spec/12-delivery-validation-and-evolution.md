@@ -33,7 +33,47 @@ before release.
 | agent integration and safe setup handoff           | 11                     | Codex/Claude Code install fixtures, scenario, drift, and no-secret tests                        |
 | release artifacts and container delivery           | 12                     | exact source/version, restricted image, raw stdio, multi-platform, and publication gates        |
 
-### Checked Delivery References
+### Mutation-class policy delivery gate
+
+This accepted alternative to #209 is not declared shipped by this specification.
+Before release, link concrete implementation and verification for:
+
+| Contract                                                                                                     | Owner  | Implementation/doc surfaces                                                                                           | Required verification                                                                                                                        |
+| ------------------------------------------------------------------------------------------------------------ | ------ | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Fixed-five read/write defaults for new and old settings; global/account inheritance and explicit replacement | 04     | `config.py`, `application/accounts.py`, catalog/import, `cli.py`, frontend grant editors; configuration/security docs | omitted/null/empty/subset/unknown cases, round-trip and legacy/managed parity                                                                |
+| Optional account draft destination                                                                           | 04     | account DTO/persistence/editor; configuration/getting-started docs                                                    | configured exact name and unique special-use discovery; missing/ambiguous mailbox failure without creation/guessing                          |
+| Effect grants and fresh checks                                                                               | 07     | mutation service/provider adapters; tools/security docs                                                               | every class and explicit/implicit mark-read; revocation at independent effects; sender/recipient constraints; no bare expunge under organize |
+| Independent draft tool and common MIME APPEND                                                                | 07, 10 | `app.py`, `application/mutations.py`, `adapters/mutations.py`, shared MIME append; tools/guides docs                  | static complete catalog, no draft mailbox/flags inputs, recipientless and supplied-recipient cases, MIME/UTF-8/attachments/APPEND ambiguity  |
+| Narrow successful-message Sent copy under send, not append                                                   | 07     | `application/mutations.py`, `adapters/mutations.py`; tools/security docs                                              | send-only copy succeeds, failed/unknown SMTP has no copy, revoke send before copy, copy failure preserves SMTP success                       |
+| Management convenience and parity                                                                            | 09     | CLI/UI; transports/troubleshooting docs                                                                               | inheritance vs explicit empty editor and conflict handling; documented CLI fields match implemented options                                  |
+
+Compatibility verification additionally covers full-grant APPEND with
+`\Deleted`, append-only denial before provider access and after grant revocation,
+and ordinary APPEND without `delete`. Schema verification covers both v3/v4
+sources, unchanged accounts/policy/secrets/revisions, rollback after partial v5
+DDL, and idempotent reopen. Published v5 upgrade instructions must explain
+coordinated restart, private consistent backups, and package-only downgrade
+incompatibility. Concrete regression coverage belongs in
+`tests/test_mutation_class_policy.py`, `tests/test_managed_catalog.py`, and the
+GreenMail stdio suite.
+
+Unit, catalog-contract, frontend, strict documentation, and GreenMail checks must
+be recorded by the integrating reviewer. This table states required evidence,
+not an assertion that those checks have passed.
+
+### Junk/restore workflow delivery gate
+
+The #254 workflow is absorbed through `move_emails` without adding public tool
+names. Spec 07 owns its behavior; spec 10 owns the additive input contract.
+`application/mutations.py`, `adapters/mutations.py`, `emails/classic.py`, and
+`app.py` must agree with `docs/tools.md`. Regression coverage in
+`tests/test_junk_move.py`, the catalog snapshot/MCP tests, and GreenMail must
+prove selectable unique discovery with special-use priority and common-name
+fallback, explicit source ownership, newly listed destination UIDs on restore,
+selector validation, unchanged explicit-move results, organize revocation,
+stale-UID outcomes, discovery/effect timeouts, and projection-failure behavior.
+
+## Checked Delivery References
 
 The following checked-in matrix records evidence for this implementation branch;
 it is not a claim about an already released version. An acceptance-ID range

@@ -8,15 +8,31 @@ independent provider effects, revalidates authority before each, records the
 available protocol evidence, and returns per-target success, failure, unknown,
 or success-with-warning.
 
-Mutation policy is deny-by-default for protected effect classes. The management
-UI in this delivery exposes no mail mutation route.
+Mutation grants default to the fixed five read/write classes, not deny-by-default;
+configuration inheritance is owned by spec 04. The management UI exposes no mail
+mutation route. The static MCP catalog does not change with effective grants.
+
+| Class      | Effects authorized                                                                             |
+| ---------- | ---------------------------------------------------------------------------------------------- |
+| `draft`    | `save_draft` only: append composed MIME to the resolved draft mailbox with fixed `\Draft` flag |
+| `organize` | mark-read/unread, approved flags and semantic tags, move and archive                           |
+| `delete`   | explicit delete and its UID-scoped deletion/expunge effects                                    |
+| `send`     | send/forward SMTP submission and narrowly their successful-message Sent copy                   |
+| `append`   | general `save_to_mailbox`, including caller-selected mailbox and flags                         |
+
+Organization may use deletion only as a scoped move fallback; it MUST NOT
+perform unrestricted expunge or expose generic delete capability. A compose
+request cannot turn `draft` into arbitrary APPEND by naming a mailbox or flags.
+Read-only (`[]`) blocks all these effects, including `mark_as_read=true` on body
+reads; ordinary reads remain available under the existing sender constraints.
 
 ## Common Mutation Pipeline
 
 For each target, in caller order:
 
 1. validate all request and aggregate limits;
-2. read and validate the current account, mailbox, and effective policy;
+2. read and validate the current account, mailbox, effective mutation grant, and
+   other policy; repeat these checks freshly at each independent effect boundary;
 3. qualify current provider state and required capability;
 4. check cancellation before the effect begins;
 5. resolve only the required selected-account secret and construct the provider;
@@ -73,9 +89,28 @@ sender-policy behavior, timeout/ambiguity evidence, current-authority checks,
 and projection invalidation. It makes no mailbox-wide or multi-target atomicity
 claim.
 
+## Save Draft
+
+`save_draft` is an independent MCP tool sharing the common MIME composition and
+APPEND implementation with `save_to_mailbox` and Sent-copy saving. It requires
+`draft`, not `append` or SMTP capability. Its compose fields allow an explicit
+empty recipient list and optional CC/BCC, subject, body, attachments, and threading
+headers. All supplied recipients require the existing recipient policy; no
+recipients is a valid draft even with an empty allowlist. Attachment preflight
+and reads occur only after account and policy authorization.
+
+It exposes no target mailbox or flags. Resolve the account's optional
+`drafts_mailbox` or exactly one special-use `\Drafts` mailbox (spec 04); apply
+only the fixed `\Draft` flag. Do not guess `Drafts`, create a mailbox, or use
+general APPEND grants as a fallback. Revalidate the effective `draft` grant and
+current account/destination authority before APPEND. Return the same APPEND
+success, assigned-UID/unknown-placement, and ambiguity semantics as the shared
+append implementation. No operation journal or approval token is required.
+
 ## Save or Append
 
-Saving a message to a mailbox is an IMAP APPEND effect. The request bounds
+`save_to_mailbox` requires `append`, even when its destination happens to be a
+draft mailbox. Saving a message to a mailbox is an IMAP APPEND effect. The request bounds
 headers, recipients, subject, body, encoded message bytes, attachments, and
 destination. File attachments preserve their inferred MIME main type and subtype
 rather than being coerced into `application/*`. Caller-supplied attachment paths,
@@ -86,6 +121,11 @@ accepted the request against the opened authority snapshot. APPEND flags accept 
 and provider keywords only when each is one complete IMAP atom; legal keyword
 forms such as `$Forwarded`, dotted names, and leading digits are not narrowed by
 a local identifier grammar, while controls and protocol specials are rejected.
+General APPEND with a case-insensitive `\Deleted` flag additionally requires
+`delete`, checked before provider access and freshly before APPEND. Full-grant
+accounts retain their historical ability to append messages with this flag;
+`append` alone does not authorize it. The flag applies only to the new message:
+modifying or expunging existing UIDs remains owned by the scoped delete workflow.
 Every APPEND path serializes the complete MIME message with CRLF line endings and
 does not emit bare LF or CR line breaks, including draft and sent-copy placement.
 When composing `In-Reply-To` or `References`, a simple whitespace-separated list
@@ -119,6 +159,26 @@ placement/projection warning rather than resubmitting.
 A move uses native UID MOVE when the provider advertises and supports it. A
 fallback may use UID COPY followed by a deletion/expunge sequence only when the
 provider offers a scoped primitive that cannot expunge unrelated messages.
+
+`move_emails` accepts exactly one of an explicit `destination_mailbox` or
+`destination_role="junk"`. Existing explicit-destination calls retain their
+success and partial-result literals. Role-based moves return the resolved
+mailbox even in partial/unknown results. Only the destination is discovered;
+the source remains caller-selected and the supplied UIDs must have been listed
+in that source mailbox. Restoring from Junk uses newly listed Junk UIDs and an
+explicit move to INBOX, never the original pre-move UID.
+
+Junk discovery prefers exactly one selectable special-use `\Junk` mailbox,
+then exactly one selectable common-name match (`Junk`, `Spam`, `[Gmail]/Spam`,
+`Junk E-mail`, `Junk Email`). Exclude `\Noselect`, preserve the server's actual
+name, reject missing/ambiguous discovery or a source-equal destination, and
+never create a mailbox. Explicit destinations remain available when discovery
+cannot decide. Require `organize` before discovery and reopen current
+selected-mode authority before moving; reuse the same scoped MOVE pipeline,
+per-target evidence, timeout handling, and projection invalidation. A discovery
+timeout fails before mutation; a move-effect timeout remains unknown and is
+not replayed. This requests a mailbox move, not guaranteed provider-side spam
+training or reporting. No separate spam/ham tool or rule engine is introduced.
 
 Archive resolves an explicit destination policy and then follows the same move
 contract. Destination creation, if supported, is a separate effect with its own
@@ -180,6 +240,15 @@ RFC 5321 limit, requires a binary submission path. This client does not implemen
 `smtp-binarymime-unsupported` failure before `MAIL` even when the provider
 advertises those capabilities. The preflight does not silently rewrite MIME
 parts or attempt a recursive base64/quoted-printable downgrade.
+
+SMTP delivery requires `send`. Its IMAP Sent-copy APPEND is a narrow part of
+that same grant, not a use of generic `append`: only the successfully submitted
+message may be copied to the configured/resolved Sent destination, under the
+existing Sent-copy flags and behavior. It cannot authorize caller-selected
+APPEND, save a failed/unknown submission, or bypass freshly checked effective
+`send`, lifecycle, endpoint, recipient, or other policy at the copy boundary.
+Revocation after SMTP success skips the copy with a warning while preserving
+SMTP success; it never triggers resubmission.
 
 SMTP delivery and IMAP sent-copy APPEND are independent effects:
 
@@ -315,6 +384,19 @@ message content, credentials, stack traces, and uncontrolled local paths do not
 enter public errors.
 
 ## Acceptance Criteria
+
+- Each effect maps to the class above, including explicit/implicit mark-read,
+  scoped organize fallback, delete, general append, recipientless draft, forward,
+  and the successful-message-only Sent-copy exception. Missing grants fail
+  before effects and freshly revoked grants stop subsequent independent effects.
+- Draft-only authority exposes no caller mailbox/flags, chooses only configured
+  or unique special-use Drafts, never creates/guesses a mailbox, and shares MIME
+  serialization/UTF-8/attachment/APPEND evidence with the existing append path.
+- Junk moves preserve explicit-destination compatibility, reject conflicting
+  selectors and non-selectable/ambiguous discovery, reopen authority before
+  moving, report resolved placement, and restore with newly listed source UIDs.
+  Tests cover missing/stale UIDs, discovery versus effect timeouts, revoked
+  organize permission, and projection failure without replay or bare EXPUNGE.
 
 1. Every mutation revalidates current authority before each independent provider
    effect and resolves only the needed account/role secret. Tests prove that a

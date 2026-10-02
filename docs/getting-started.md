@@ -68,6 +68,16 @@ are included with the same replacement/precedence rules used by legacy runtime.
 Credential values remain absent from preview and are read only during confirmed
 apply. Do not pass them through MCP or chat.
 
+### Upgrading an existing managed catalog
+
+Managed v3/v4 catalogs migrate to v5 on the first access by the new application.
+Existing accounts retain full mutation grants by default; no permission reset
+or account re-entry is required. Stop all older catalog users, keep a private
+consistent backup, and upgrade UI, CLI, and MCP together before restarting the
+clients. An older runtime cannot read v5, so a package-only downgrade is not a
+rollback. See the [managed upgrade steps](configuration.md#upgrading-a-managed-catalog-to-v5).
+Legacy TOML/environment users are not automatically switched to managed mode.
+
 ## Configure an account with the UI
 
 Run one of the V2 commands in [Version availability](#version-availability).
@@ -99,7 +109,13 @@ On first use:
 4. under **Settings & help**, add recipient addresses or glob patterns (for
    example `*@example.com`) and optional sender patterns as individual items.
    `*` explicitly allows every recipient for sending, forwarding, and drafts.
-   No recipients disables all three operations; no senders leaves reading unrestricted;
+   No recipients disables sending and general saves; recipientless `save_draft`
+   is still allowed by its mutation grant. No senders leaves reading unrestricted;
+   choose global mutation permissions in this panel and inheritance or an
+   explicit override in the account editor. Omitted settings retain all five
+   write classes; choose an empty list for read-only. Set the optional draft
+   mailbox on the account only if special-use Drafts discovery is unavailable
+   or ambiguous;
 5. saved complete accounts are immediately usable by managed runtime; there is
    no catalog activation or second save. Incomplete accounts remain visible in
    diagnostics but do not hide complete accounts;
@@ -111,7 +127,9 @@ and per-account semantic tags, and **Settings & help** for importing earlier
 settings, sending/attachment safety, and bounded troubleshooting checks. The
 attachment settings distinguish saving files on the server from returning bytes
 through MCP for clients such as ChatGPT apps. Ordinary labels and errors use task language;
-storage and concurrency terms are kept out of the primary workflow. Optional
+storage and concurrency terms are kept out of the primary workflow. Account creation
+becomes available after the account list and inherited permissions finish loading.
+Optional
 settings are loaded only when their disclosure
 is opened. On Linux and Windows, managed credentials default to the private
 `managed_secret` table in the managed SQLite database. macOS uses the

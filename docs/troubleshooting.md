@@ -15,12 +15,34 @@ MCP_EMAIL_SERVER_LOG_LEVEL=DEBUG mcp-email-server stdio
 
 Restart the server after changing configuration paths or environment variables.
 
+## A mail write is denied by mutation policy
+
+Check global `allowed_mutations` and the account override. Omission/null on an
+account inherits; an explicit list replaces the defaults; `[]` is read-only.
+Omitted global settings enable all five classes for existing and fresh setups.
+Choose only the needed classes in the policy/account editors. Adding SMTP does
+not grant `send`, and setting recipients does not grant any mutation class.
+Tools remain visible even when their calls are denied. See the
+[effect mapping](tools.md#mail-mutation-permissions). For a read-only account,
+read bodies without `mark_as_read=true`.
+
+## Draft mailbox is missing or ambiguous
+
+`save_draft` uses the account's `drafts_mailbox` or a unique special-use
+`\Drafts` mailbox. If none or several advertise that attribute, use
+`list_mailboxes` and set the exact existing name in account configuration. The
+tool does not guess `Drafts`, create a mailbox, or accept a caller destination
+or flag list. It requires `draft`; general `save_to_mailbox` requires `append`.
+For a draft without recipients, pass an explicit empty recipient list. If any
+To/CC/BCC addresses are supplied, all must match the recipient allowlist.
+
 ## Recipient allowlist errors
 
 If sending or saving reports `Recipient(s) not in allowlist`, check that every
 To, CC, and BCC address matches an entry in `allowed_recipients`. An empty list
 blocks `send_email`, `forward_email`, and `save_to_mailbox`, even when SMTP or
-IMAP credentials work. This applies in both managed and legacy mode. Earlier
+IMAP credentials work. Recipientless `save_draft` is permitted when the account
+has `draft`; supplied draft recipients still require a match. This applies in both managed and legacy mode. Earlier
 implementations incorrectly allowed any recipient for an empty list; see the
 [upgrade note](security.md#recipient-policy-upgrade-note).
 
@@ -143,12 +165,19 @@ sidecar itself is unparseable, repair or restore that sidecar manually; `reset`
 cannot safely infer its mode and therefore does not unlink the independent legacy
 source.
 
-Schema v3 is the only supported pre-release managed-catalog migration source.
-The first v4 open performs that migration transactionally, preserving account,
-policy, binding, and secret rows while initializing empty tag mappings and a
-disabled attachment-content policy. If startup was attempted before upgrading
-the application, restart it after checking out the v4-capable version. A failed
-migration rolls back without advertising v4.
+Schemas v3 and v4 are supported managed-catalog migration sources for v5.
+The first new-version catalog access migrates transactionally, preserving account,
+policy, binding, secret rows, and revisions. Both sources receive full global
+mutation grants and inheriting account overrides; v3 also receives empty tag
+mappings and a disabled attachment-content policy. A failed migration leaves the
+source version intact.
+
+An older MCP process will reject the catalog after another new-version UI, CLI,
+or MCP process migrates it. Upgrade all catalog users together and restart every
+MCP client. If rolling back the package, restore the consistent pre-migration
+catalog backup too; do not edit the schema version manually, delete the catalog,
+or re-enter all accounts as a routine upgrade fix. Follow the
+[managed upgrade and rollback steps](configuration.md#upgrading-a-managed-catalog-to-v5).
 
 Other older development schemas are still rejected. For those versions, select
 legacy mode, preserve the old file for rollback, and initialize a fresh

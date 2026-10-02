@@ -115,12 +115,16 @@ backups include plaintext `managed_secret.secret_value` values. Keep every copy
 under protection equivalent to the private original; do not upload, share, or
 treat it as a non-secret account database.
 
-The declared v3-to-v4 catalog migration runs only after the existing catalog and
-sidecars pass the same private-file checks as a normal managed open. One bounded
-SQLite write transaction validates the exact v3 schema, adds default-disabled
-attachment content and empty tag mappings, validates the resulting v4 schema and
-invariants, and records version 4 last. It neither selects nor copies secret
-values; failure rolls back without changing the advertised schema version.
+The declared v3/v4-to-v5 catalog migration runs only after the existing catalog
+and sidecars pass the same private-file checks as a normal managed open. One
+bounded SQLite write transaction validates the exact source schema, adds the
+fixed-five global grants, inheriting account overrides, and unset draft mailbox.
+A v3 source also receives default-disabled attachment content and empty tag
+mappings. It validates the resulting v5 schema and invariants and records version
+5 last. It neither resolves nor copies secret values; failure rolls back without
+changing the advertised source version. Older runtimes reject v5. Stop all
+catalog users and retain a private, consistent backup before the first new-version
+open; see [managed catalog upgrades](configuration.md#upgrading-a-managed-catalog-to-v5).
 
 A create or rotation stores a new immutable value and commits it as active only
 if the reviewed account revision still matches. On Linux and Windows, inserting
@@ -535,9 +539,38 @@ empty result means sending is disabled; it never means unrestricted sending.
 The Web UI edits recipients as individual add/edit/remove items and states this
 empty behavior explicitly. The restriction applies equally in managed and
 legacy mode and covers To, CC, and BCC. An initially empty policy is rejected
-before a provider is opened, including before a forward source is read.
+before a provider is opened for recipient-bearing compose, including before a
+forward source is read. A recipientless `save_draft` is the explicit exception
+described below.
 Clearing the last recipient does not enable unrestricted sending. This policy
 is not a read-only mode: other mailbox mutations remain available.
+
+### Mutation grants and read-only accounts
+
+Mail writes require an effective `allowed_mutations` class independently of
+recipient/sender restrictions. Omitted global fields retain all five classes
+(`draft`, `organize`, `delete`, `send`, `append`) for both new and old settings;
+there is no deny-by-default conversion. An omitted/null account override inherits;
+an explicit list replaces the global list. Set `[]` explicitly for read-only.
+See [configuration](configuration.md#mail-mutation-permissions) and the
+[effect mapping](tools.md#mail-mutation-permissions).
+
+Effective permissions and account authority are checked freshly at independent
+effect boundaries. Revoking `send` after SMTP acceptance prevents a subsequent
+Sent copy but never erases delivery success or causes resubmission. `send`
+authorizes only that successful message's Sent copy, not general APPEND.
+`organize` cannot expunge unrelated deleted messages. `draft` authorizes only
+`save_draft` with a configured or unique special-use draft destination and fixed
+`\Draft` flag; the caller cannot choose a mailbox or flags. No mailbox is
+created or guessed. These restrictions need no approval tokens or extra ledger.
+
+A recipientless `save_draft` is valid even with an empty recipient allowlist.
+Every supplied To/CC/BCC address still requires a match before attachments are
+read or the message is appended. This exception does not allow recipientless
+SMTP submission or unrestricted `save_to_mailbox`. Read-only grants block
+implicit mark-read too; read without marking instead. Sender constraints,
+attachment protections, and provider capabilities remain unchanged. Permissions
+do not hide tools from the static MCP catalog.
 
 ### Recipient policy upgrade note
 
