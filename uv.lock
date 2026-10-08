@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11, <4.0"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -804,6 +804,7 @@ dependencies = [
     { name = "beautifulsoup4" },
     { name = "click" },
     { name = "filelock" },
+    { name = "httpx" },
     { name = "jinja2" },
     { name = "keyring" },
     { name = "loguru" },
@@ -842,6 +843,7 @@ requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.14.3" },
     { name = "click", specifier = ">=8.0.0" },
     { name = "filelock", specifier = ">=3.32.2" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "jinja2", specifier = ">=3.1.5" },
     { name = "keyring", specifier = ">=25.0" },
     { name = "loguru", specifier = ">=0.7.3" },
