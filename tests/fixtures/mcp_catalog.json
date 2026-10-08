@@ -959,8 +959,8 @@
                         "anyOf": [
                             {
                                 "items": {
-                                    "description": "Attachment URL: http(s) URL to download, or a data: URL (base64) carrying the file inline.",
-                                    "maxLength": 4096,
+                                    "description": "Attachment URL: an http(s) URL the server downloads (short reference, 4096 chars), or a data: URL (base64) carrying the file inline (bounded to 4194304 chars). Decoded content is capped at 26214400 bytes.",
+                                    "maxLength": 4194304,
                                     "type": "string"
                                 },
                                 "maxItems": 20,
@@ -1252,8 +1252,8 @@
                         "anyOf": [
                             {
                                 "items": {
-                                    "description": "Attachment URL: http(s) URL to download, or a data: URL (base64) carrying the file inline.",
-                                    "maxLength": 4096,
+                                    "description": "Attachment URL: an http(s) URL the server downloads (short reference, 4096 chars), or a data: URL (base64) carrying the file inline (bounded to 4194304 chars). Decoded content is capped at 26214400 bytes.",
+                                    "maxLength": 4194304,
                                     "type": "string"
                                 },
                                 "maxItems": 20,
@@ -1441,8 +1441,8 @@
                         "anyOf": [
                             {
                                 "items": {
-                                    "description": "Attachment URL: http(s) URL to download, or a data: URL (base64) carrying the file inline.",
-                                    "maxLength": 4096,
+                                    "description": "Attachment URL: an http(s) URL the server downloads (short reference, 4096 chars), or a data: URL (base64) carrying the file inline (bounded to 4194304 chars). Decoded content is capped at 26214400 bytes.",
+                                    "maxLength": 4194304,
                                     "type": "string"
                                 },
                                 "maxItems": 20,

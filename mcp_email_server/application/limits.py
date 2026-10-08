@@ -29,6 +29,13 @@ class ApplicationLimits:
     metadata_snapshot_rows: int = 1_000
     attachments: int = 20
     attachment_path_bytes: int = 4_096
+    # Ceiling for a caller-supplied attachment URL string. http/https URLs are
+    # short references and stay bounded by attachment_path_bytes; data: URLs
+    # carry the file inline as base64 (+33% over the decoded size) and therefore
+    # need a dedicated, much larger bound. The decoded content is still capped
+    # by attachment_bytes (the base64 alphabet guarantees a data URL this long
+    # decodes to at most ~3 MiB, far under the 25 MiB content ceiling).
+    data_url_bytes: int = 4 * 1_024 * 1_024
     flags: int = 100
     flag_bytes: int = 128
     attachment_bytes: int = 25 * 1_024 * 1_024

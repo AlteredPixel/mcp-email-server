@@ -57,8 +57,14 @@ AttachmentPathInput = Annotated[str, Field(max_length=APPLICATION_LIMITS.attachm
 AttachmentUrlInput = Annotated[
     str,
     Field(
-        max_length=APPLICATION_LIMITS.attachment_path_bytes,
-        description="Attachment URL: http(s) URL to download, or a data: URL (base64) carrying the file inline.",
+        max_length=APPLICATION_LIMITS.data_url_bytes,
+        description=(
+            "Attachment URL: an http(s) URL the server downloads (short reference, "
+            f"{APPLICATION_LIMITS.attachment_path_bytes} chars), or a data: URL (base64) carrying the "
+            "file inline (bounded to "
+            f"{APPLICATION_LIMITS.data_url_bytes} chars). Decoded content is capped at "
+            f"{APPLICATION_LIMITS.attachment_bytes} bytes."
+        ),
     ),
 ]
 FlagInput = Annotated[str, Field(max_length=APPLICATION_LIMITS.flag_bytes)]

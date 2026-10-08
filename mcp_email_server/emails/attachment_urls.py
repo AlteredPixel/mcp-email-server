@@ -15,17 +15,28 @@ accepted; redirects to other schemes are refused. Retrieval size is bounded at
 read time (a download can lie about ``Content-Length``), the per-attachment
 ceiling applies to decoded content, and the caller's URL is never echoed into
 logs — only the derived filename is logged.
+
+Network guard: the server process would otherwise be an arbitrary fetcher for
+the MCP caller. By default every request in the redirect chain must resolve to
+a public network address — loopback, private, link-local (cloud metadata),
+and otherwise reserved ranges are refused, re-checked on every hop. Deployments
+that deliberately serve attachments from a private network can opt out with
+``MCP_EMAIL_SERVER_ALLOW_PRIVATE_ATTACHMENT_HOSTS=1``; see
+``docs/security.md``.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
+import os
 import re
+import socket
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
 
 import httpx
 
@@ -35,6 +46,7 @@ from mcp_email_server.log import logger
 _URL_SCHEMES = frozenset({"http", "https"})
 _DOWNLOAD_CHUNK_BYTES = 64 * 1_024
 _HTTP_TIMEOUT_SECONDS = 30.0
+_PRIVATE_HOSTS_ENV = "MCP_EMAIL_SERVER_ALLOW_PRIVATE_ATTACHMENT_HOSTS"
 
 # Loose RFC 2397 shape: data:[<mediatype>][;base64],<payload>
 _DATA_URL_PATTERN = re.compile(r"^data:(?P<mediatype>[^,]*)?,(?P<payload>.*)\Z", re.DOTALL)
@@ -64,11 +76,11 @@ class MaterializedAttachments:
             self.cleanup.cleanup()
 
 
-def is_attachment_url(reference: str) -> bool:
-    """Return True when the reference is a URL form this module resolves."""
-
-    scheme = urlparse(reference).scheme.lower()
-    return scheme in _URL_SCHEMES or scheme == "data"
+def _url_ceiling_bytes(url: str) -> int:
+    """Return the string-size ceiling for one URL: data: URLs carry content inline."""
+    if url.lower().startswith("data:"):
+        return APPLICATION_LIMITS.data_url_bytes
+    return APPLICATION_LIMITS.attachment_path_bytes
 
 
 def validate_attachment_urls(urls: tuple[str, ...]) -> None:
@@ -84,10 +96,11 @@ def validate_attachment_urls(urls: tuple[str, ...]) -> None:
     if any(not isinstance(raw_url, str) for raw_url in urls):
         raise ValueError("attachment URLs must be strings")
     for raw_url in urls:
+        ceiling = _url_ceiling_bytes(raw_url)
         validate_controlled_string(
             raw_url,
             field_name="attachment URL",
-            maximum_bytes=APPLICATION_LIMITS.attachment_path_bytes,
+            maximum_bytes=ceiling,
         )
         scheme = urlparse(raw_url).scheme.lower()
         if scheme not in _URL_SCHEMES and scheme != "data":
@@ -127,8 +140,6 @@ def _decode_data_url(data_url: str) -> bytes:
     try:
         if mediatype.casefold().endswith(";base64"):
             return base64.b64decode(payload, validate=True)
-        from urllib.parse import unquote_to_bytes
-
         return unquote_to_bytes(payload)
     except (binascii.Error, ValueError) as exc:
         raise AttachmentUrlError("data URL payload could not be decoded") from exc
@@ -146,30 +157,109 @@ def _unique_path(directory: Path, filename: str, seen: set[str]) -> Path:
     return candidate
 
 
+def _private_hosts_allowed() -> bool:
+    """Explicit opt-out for serving attachments from a private network."""
+    return os.getenv(_PRIVATE_HOSTS_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _guard_resolved_address(host: str, ip: str) -> None:
+    """Refuse a resolution result pointing at a non-public network address.
+
+    By default the attachment fetcher must stay a public-network client: loopback,
+    RFC 1918, link-local (including the 169.254/16 cloud metadata endpoint),
+    and every other reserved range are refused. IPv6-mapped IPv4 addresses are
+    unwrapped so the IPv4 classification still applies.
+    """
+
+    if _private_hosts_allowed():
+        return
+    address = ipaddress.ip_address(ip)
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    if not address.is_global:
+        raise AttachmentUrlError("attachment URL host resolves to a non-public network address")
+
+
+def _host_addresses(hostname: str) -> list[str]:
+    """Resolve the host to the addresses a connection could actually use."""
+
+    try:
+        infos = socket.getaddrinfo(hostname, 443, 0, socket.SOCK_STREAM)
+    except OSError as exc:
+        raise AttachmentUrlError("attachment URL host could not be resolved") from exc
+    addresses = [str(info[4][0]).lstrip("[]") for info in infos]
+    if not addresses:
+        raise AttachmentUrlError("attachment URL host could not be resolved")
+    return addresses
+
+
+def assert_public_host(hostname: str) -> None:
+    """Refuse a host that resolves entirely or partly into non-public address space.
+
+    Called before every request hop (initial URL and each redirect), so a
+    redirect to an internal destination is refused as well. The check runs at
+    request time; DNS may change between the check and the connect, and the
+    deployment-facing statement of that residual is in ``docs/security.md``.
+    """
+
+    if not hostname:
+        raise AttachmentUrlError("attachment URL has no host")
+    if _private_hosts_allowed():
+        return
+    for address in _host_addresses(hostname):
+        _guard_resolved_address(hostname, address)
+
+
+_MAX_REDIRECTS = 10
+_REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
+
+
+def _check_content_ceiling(content: bytes) -> None:
+    """Bound decoded content; both resolvers already enforce this at read time.
+
+    Retained as the defensive net if either resolver path ever loses its bound.
+    """
+
+    if len(content) > APPLICATION_LIMITS.attachment_bytes:
+        raise ValueError(f"an attachment exceeds {APPLICATION_LIMITS.attachment_bytes} bytes")
+
+
 async def _fetch_http_url(url: str) -> bytes:
     """Download at most one byte over the per-attachment ceiling.
 
     ``Content-Length`` is untrusted, so the bound is enforced on streamed bytes.
-    Redirects are followed by httpx but the final URL scheme is re-checked so a
-    redirect can not escape to a non-http(s) scheme.
+    Redirects are followed manually (at most ``_MAX_REDIRECTS`` hops) so that
+    each hop — not only the final URL — is re-checked: the scheme must stay
+    http(s) and ``assert_public_host`` re-resolves the hop's host, refusing
+    non-public address space on every hop.
     """
 
     ceiling = APPLICATION_LIMITS.attachment_bytes
-    async with httpx.AsyncClient(follow_redirects=True, timeout=_HTTP_TIMEOUT_SECONDS) as client:
-        async with client.stream("GET", url) as response:
-            if response.status_code >= 400:
-                raise AttachmentUrlError(f"attachment URL request failed with HTTP {response.status_code}")
-            chunks: list[bytes] = []
-            downloaded = 0
-            async for chunk in response.aiter_bytes(_DOWNLOAD_CHUNK_BYTES):
-                downloaded += len(chunk)
-                if downloaded > ceiling:
-                    raise ValueError(f"an attachment exceeds {ceiling} bytes")
-                chunks.append(chunk)
-        _final_url = str(response.url)
-    if urlparse(_final_url).scheme.lower() not in _URL_SCHEMES:
-        raise AttachmentUrlError("attachment URL redirected to a non-http(s) scheme")
-    return b"".join(chunks)
+    async with httpx.AsyncClient(follow_redirects=False, timeout=_HTTP_TIMEOUT_SECONDS) as client:
+        current_url = url
+        for _hop in range(_MAX_REDIRECTS + 1):
+            parsed = urlparse(current_url)
+            if parsed.scheme.lower() not in _URL_SCHEMES:
+                raise AttachmentUrlError("attachment URL redirected to a non-http(s) scheme")
+            assert_public_host(parsed.hostname or "")
+            async with client.stream("GET", current_url) as response:
+                if response.status_code in _REDIRECT_STATUS_CODES:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise AttachmentUrlError("attachment URL redirect is missing a Location header")
+                    current_url = urljoin(current_url, location)
+                    continue
+                if response.status_code >= 400:
+                    raise AttachmentUrlError(f"attachment URL request failed with HTTP {response.status_code}")
+                chunks: list[bytes] = []
+                downloaded = 0
+                async for chunk in response.aiter_bytes(_DOWNLOAD_CHUNK_BYTES):
+                    downloaded += len(chunk)
+                    if downloaded > ceiling:
+                        raise ValueError(f"an attachment exceeds {ceiling} bytes")
+                    chunks.append(chunk)
+                return b"".join(chunks)
+    raise AttachmentUrlError("attachment URL exceeded the maximum number of redirects")
 
 
 async def resolve_attachment_urls(attachments: tuple[str, ...], urls: tuple[str, ...]) -> MaterializedAttachments:
@@ -198,8 +288,7 @@ async def resolve_attachment_urls(attachments: tuple[str, ...], urls: tuple[str,
                 content = _decode_data_url(url)
             else:
                 content = await _fetch_http_url(url)
-            if len(content) > APPLICATION_LIMITS.attachment_bytes:
-                raise ValueError(f"an attachment exceeds {APPLICATION_LIMITS.attachment_bytes} bytes")
+            _check_content_ceiling(content)
             filename = _filename_from_data_mediatype(url) if url.lower().startswith("data:") else _filename_from_http_url(url)
             path = _unique_path(directory, filename, seen)
             path.write_bytes(content)

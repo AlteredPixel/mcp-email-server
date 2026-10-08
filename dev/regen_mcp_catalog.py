@@ -16,7 +16,8 @@ async def main() -> dict:
 
 
 actual = asyncio.run(main())
-old = json.load(open("tests/fixtures/mcp_catalog.json"))
+with open("tests/fixtures/mcp_catalog.json") as fh:
+    old = json.load(fh)
 old_tools = {t["name"]: t for t in old["tools"]}
 for t in actual["tools"]:
     o = old_tools.get(t["name"])

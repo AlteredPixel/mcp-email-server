@@ -15,13 +15,13 @@ from mcp_email_server.application.limits import (
     validate_serialized_result,
 )
 from mcp_email_server.application.metadata import RuntimeMode
-from mcp_email_server.emails.attachment_urls import resolve_attachment_urls, validate_attachment_urls
 from mcp_email_server.application.mutation_policy import (
     DEFAULT_ALLOWED_MUTATIONS,
     MutationClass,
     require_append_permissions,
     require_mutation,
 )
+from mcp_email_server.emails.attachment_urls import resolve_attachment_urls, validate_attachment_urls
 from mcp_email_server.imap_keywords import ImapKeywordRegistry
 
 MutationStatus = Literal["succeeded", "failed", "unknown"]
@@ -432,6 +432,10 @@ class ForwardCommand(ComposeCommand):
             raise ValueError("forwarded content is composed as plain text; html is not supported")
         if self.attachments:
             raise ValueError("forward does not accept caller attachments; the source's parts are re-attached")
+        if self.attachment_urls:
+            raise ValueError(
+                "forward does not accept caller attachment URLs; the source's parts are re-attached"
+            )
 
 
 class MutationAccountAuthority(Protocol):

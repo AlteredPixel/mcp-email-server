@@ -47,6 +47,22 @@ class TestValidateAttachmentUrls:
         with pytest.raises(ValueError):
             validate_attachment_urls(("https://example.com/" + "a" * APPLICATION_LIMITS.attachment_path_bytes,))
 
+    def test_data_url_uses_dedicated_ceiling(self):
+        # A data URL just under the dedicated data_url_bytes bound (100 KiB of
+        # file content encoded) must pass validation even though it far exceeds
+        # attachment_path_bytes.
+        payload = base64.b64encode(b"A" * (100 * 1024)).decode()
+        data_url = f"data:application/octet-stream;base64,{payload}"
+        assert len(data_url) > APPLICATION_LIMITS.attachment_path_bytes
+        validate_attachment_urls((data_url,))
+
+    def test_data_url_over_dedicated_ceiling_rejected(self):
+        # base64 of 4 MiB+ is over data_url_bytes; the dedicated bound rejects
+        # it (it used to be rejected by attachment_path_bytes at ~3 KiB).
+        oversized = "data:application/octet-stream;base64," + "A" * (APPLICATION_LIMITS.data_url_bytes + 1)
+        with pytest.raises(ValueError):
+            validate_attachment_urls((oversized,))
+
 
 class TestResolveAttachmentUrls:
     async def test_data_url_base64_is_materialized(self, tmp_path):
@@ -71,6 +87,8 @@ class TestResolveAttachmentUrls:
 
     async def test_http_url_is_downloaded(self, tmp_path, monkeypatch):
         from mcp_email_server.emails import attachment_urls
+
+        monkeypatch.setattr(attachment_urls, "assert_public_host", lambda _host: None)
 
         class FakeResponse:
             status_code = 200
@@ -135,6 +153,8 @@ class TestResolveAttachmentUrls:
     async def test_http_error_raises(self, monkeypatch):
         from mcp_email_server.emails import attachment_urls
 
+        monkeypatch.setattr(attachment_urls, "assert_public_host", lambda _host: None)
+
         class FakeResponse:
             status_code = 404
             url = "https://example.com/missing.pdf"
@@ -188,6 +208,119 @@ class TestResolveAttachmentUrls:
         assert not directory.exists()
 
 
+class _FakeResponse:
+    """Minimal httpx stream-response stand-in for ``client.stream`` tests."""
+
+    def __init__(self, status_code, content=b"", headers=None, url="https://example.com/x.pdf"):
+        self.status_code = status_code
+        self.content = content
+        self.headers = headers or {}
+        self.url = url
+
+    def aiter_bytes(self, _chunk):
+        async def gen():
+            if self.content:
+                yield self.content
+
+        return gen()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return None
+
+
+def _fake_client(monkeypatch, responses):
+    """Install a FakeClient whose ``stream`` pops ``responses`` in order."""
+    from mcp_email_server.emails import attachment_urls
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            self._next = iter(responses)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        def stream(self, _method, url):
+            response = next(self._next)
+            if isinstance(response, list):
+                response, final_url = response[0], response[1]
+            else:
+                final_url = url
+            response.url = final_url
+            return response
+
+    monkeypatch.setattr(attachment_urls.httpx, "AsyncClient", FakeClient)
+
+
+class TestHostGuard:
+    def test_non_public_addresses_are_refused(self):
+        from mcp_email_server.emails.attachment_urls import _guard_resolved_address
+
+        for ip in ("127.0.0.1", "10.0.0.1", "192.168.1.10", "169.254.169.254", "0.0.0.0", "::1", "fe80::1", "fc00::1"):  # noqa: S104 - non-public addresses under test
+            with pytest.raises(AttachmentUrlError, match="non-public"):
+                _guard_resolved_address("internal", ip)
+
+    def test_public_addresses_pass(self):
+        from mcp_email_server.emails.attachment_urls import _guard_resolved_address
+
+        for ip in ("8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"):
+            _guard_resolved_address("public", ip)
+
+    def test_ipv4_mapped_ipv6_is_unwrapped(self):
+        from mcp_email_server.emails.attachment_urls import _guard_resolved_address
+
+        with pytest.raises(AttachmentUrlError, match="non-public"):
+            _guard_resolved_address("internal", "::ffff:127.0.0.1")
+        _guard_resolved_address("public", "::ffff:8.8.8.8")
+
+    def test_opt_out_env_allows_private_hosts(self, monkeypatch):
+        from mcp_email_server.emails import attachment_urls
+
+        monkeypatch.setenv(attachment_urls._PRIVATE_HOSTS_ENV, "1")
+        attachment_urls._guard_resolved_address("internal", "127.0.0.1")
+
+
+class TestRedirectGuard:
+    async def test_redirect_to_private_host_is_refused(self, monkeypatch):
+        """A public 302 hop to 127.0.0.1 must be refused at the redirect hop."""
+        from mcp_email_server.emails import attachment_urls
+
+        def fake_guard(hostname):
+            if hostname == "127.0.0.1":
+                raise AttachmentUrlError("attachment URL host resolves to a non-public network address")
+
+        monkeypatch.setattr(attachment_urls, "assert_public_host", fake_guard)
+        _fake_client(
+            monkeypatch,
+            [
+                _FakeResponse(302, headers={"location": "http://127.0.0.1/admin/config"}),
+                _FakeResponse(200, content=b"should never be read"),
+            ],
+        )
+        with pytest.raises(AttachmentUrlError, match="non-public"):
+            await attachment_urls._fetch_http_url("https://example.com/public.pdf")
+
+    async def test_redirects_are_followed_and_materialized(self, monkeypatch):
+        """A two-hop redirect chain stays inside http(s) and downloads the final body."""
+        from mcp_email_server.emails import attachment_urls
+
+        monkeypatch.setattr(attachment_urls, "assert_public_host", lambda _host: None)
+        _fake_client(
+            monkeypatch,
+            [
+                _FakeResponse(302, headers={"location": "https://example.com/step2"}),
+                _FakeResponse(200, content=b"final bytes"),
+            ],
+        )
+        content = await attachment_urls._fetch_http_url("https://example.com/step1")
+        assert content == b"final bytes"
+
+
 class TestComposeCommandAttachmentUrls:
     def test_compose_command_accepts_attachment_urls(self):
         from mcp_email_server.application.mutations import SendCommand
@@ -212,6 +345,20 @@ class TestComposeCommandAttachmentUrls:
             attachment_urls=("file:///etc/passwd",),
         )
         with pytest.raises(ValueError, match="http, https, or data"):
+            command.validate()
+
+    def test_forward_command_rejects_caller_attachment_urls(self):
+        from mcp_email_server.application.mutations import ForwardCommand
+
+        command = ForwardCommand(
+            account_name="test",
+            recipients=("to@example.com",),
+            subject="",
+            body="note",
+            source_email_id="123",
+            attachment_urls=("https://example.com/file.pdf",),
+        )
+        with pytest.raises(ValueError, match="forward does not accept caller attachment URLs"):
             command.validate()
 
 
