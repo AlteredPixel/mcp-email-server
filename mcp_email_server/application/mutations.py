@@ -15,6 +15,7 @@ from mcp_email_server.application.limits import (
     validate_serialized_result,
 )
 from mcp_email_server.application.metadata import RuntimeMode
+from mcp_email_server.emails.attachment_urls import resolve_attachment_urls, validate_attachment_urls
 from mcp_email_server.application.mutation_policy import (
     DEFAULT_ALLOWED_MUTATIONS,
     MutationClass,
@@ -323,6 +324,7 @@ class ComposeCommand:
     attachments: tuple[str, ...] = ()
     in_reply_to: str | None = None
     references: str | None = None
+    attachment_urls: tuple[str, ...] = ()
 
     def validate(self) -> None:
         self._validate_compose()
@@ -331,6 +333,7 @@ class ComposeCommand:
         _validate_account_name(self.account_name)
         _validate_recipients((*self.recipients, *self.cc, *self.bcc), allow_empty=allow_recipientless)
         _validate_content(self.subject, self.body, self.attachments)
+        _validate_attachment_urls(self.attachment_urls)
         _validate_optional_header("in_reply_to", self.in_reply_to)
         _validate_optional_header("references", self.references)
         if self.in_reply_to is not None:
@@ -607,6 +610,10 @@ def _validate_attachment_paths(attachments: tuple[str, ...]) -> None:
             field_name="attachment path",
             maximum_bytes=APPLICATION_LIMITS.attachment_path_bytes,
         )
+
+
+def _validate_attachment_urls(urls: tuple[str, ...]) -> None:
+    validate_attachment_urls(urls)
 
 
 def _preflight_attachment_sizes(attachments: tuple[str, ...]) -> None:
@@ -1079,21 +1086,27 @@ class SaveToMailboxService(_MutationWorkflow):
         access = self._open(account)
         require_append_permissions(access.account.allowed_mutations, command.flags)
         _validate_recipient_policy(command, access.account)
-        _preflight_attachment_sizes(command.attachments)
+        # URL attachments are fetched only after authorization.
+        materialized = await resolve_attachment_urls(command.attachments, command.attachment_urls)
         try:
-            outcome = _validate_append_result(
-                await _bounded_provider_effect(access.provider.save_to_mailbox(command, access.account))
-            )
-        except TimeoutError:
-            outcome = _validate_append_result(
-                AppendMutationOutcome(
-                    status="unknown",
-                    message_id="",
-                    mailbox=command.mailbox,
-                    detail="provider-timeout",
-                    reconciliation_needed=True,
+            command = replace(command, attachments=materialized.paths, attachment_urls=())
+            _preflight_attachment_sizes(command.attachments)
+            try:
+                outcome = _validate_append_result(
+                    await _bounded_provider_effect(access.provider.save_to_mailbox(command, access.account))
                 )
-            )
+            except TimeoutError:
+                outcome = _validate_append_result(
+                    AppendMutationOutcome(
+                        status="unknown",
+                        message_id="",
+                        mailbox=command.mailbox,
+                        detail="provider-timeout",
+                        reconciliation_needed=True,
+                    )
+                )
+        finally:
+            materialized.close()
         if outcome.status not in ("succeeded", "unknown"):
             return outcome
         invalidated = await self._invalidate(access.account, (command.mailbox,))
@@ -1127,16 +1140,23 @@ class SaveDraftService(_MutationWorkflow):
         if access.account.drafts_mailbox != account.drafts_mailbox:
             raise PermissionError("Draft mailbox authority changed; retry")
         _validate_recipient_policy(command, access.account)
-        _preflight_attachment_sizes(command.attachments)
-        append = DraftAppendCommand(**vars(command), mailbox=mailbox, flags=(r"\Draft",))
+        # URL attachments are fetched only after authorization and the mailbox
+        # authority re-check, immediately before the APPEND effect.
+        materialized = await resolve_attachment_urls(command.attachments, command.attachment_urls)
         try:
-            outcome = _validate_append_result(
-                await _bounded_provider_effect(access.provider.save_to_mailbox(append, access.account))
-            )
-        except TimeoutError:
-            outcome = AppendMutationOutcome(
-                "unknown", "", mailbox=mailbox, detail="provider-timeout", reconciliation_needed=True
-            )
+            command = replace(command, attachments=materialized.paths, attachment_urls=())
+            _preflight_attachment_sizes(command.attachments)
+            append = DraftAppendCommand(**vars(command), mailbox=mailbox, flags=(r"\Draft",))
+            try:
+                outcome = _validate_append_result(
+                    await _bounded_provider_effect(access.provider.save_to_mailbox(append, access.account))
+                )
+            except TimeoutError:
+                outcome = AppendMutationOutcome(
+                    "unknown", "", mailbox=mailbox, detail="provider-timeout", reconciliation_needed=True
+                )
+        finally:
+            materialized.close()
         if outcome.status in ("succeeded", "unknown"):
             invalidated = await self._invalidate(access.account, (mailbox,))
             outcome = replace(outcome, reconciliation_needed=outcome.reconciliation_needed or not invalidated)
@@ -1279,14 +1299,21 @@ class SendService(_MutationWorkflow):
         require_mutation(access.account.allowed_mutations, "send")
         self._require_send_capability(access.account)
         _validate_recipient_policy(command, access.account)
-        _preflight_attachment_sizes(command.attachments)
+        # URL attachments are fetched only after authorization, mirroring when
+        # _preflight_attachment_sizes is allowed to stat caller paths.
+        materialized = await resolve_attachment_urls(command.attachments, command.attachment_urls)
         try:
-            delivery = _validate_delivery_result(
-                await _bounded_provider_effect(access.provider.send(command, access.account))
-            )
-        except TimeoutError:
-            return self._delivery_timeout(command)
-        return await self._complete_send(account, delivery, command.bcc)
+            command = replace(command, attachments=materialized.paths, attachment_urls=())
+            _preflight_attachment_sizes(command.attachments)
+            try:
+                delivery = _validate_delivery_result(
+                    await _bounded_provider_effect(access.provider.send(command, access.account))
+                )
+            except TimeoutError:
+                return self._delivery_timeout(command)
+            return await self._complete_send(account, delivery, command.bcc)
+        finally:
+            materialized.close()
 
 
 class ForwardService(_MutationWorkflow):
