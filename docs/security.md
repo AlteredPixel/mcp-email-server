@@ -728,6 +728,32 @@ stat, or resolve caller-supplied attachment paths, including UNC or network
 paths. Once those checks pass, attachment size or file-access validation may
 still reject the request after filesystem access.
 
+### URL attachments and the network guard
+
+The `attachment_urls` parameter accepts `http(s)` URLs and inline `data:` URLs.
+Because the MCP caller is an LLM whose tool input can be influenced by email
+content, the server treats an unguarded fetcher as an SSRF surface: by default,
+before every request hop — the initial URL and each redirect, up to 10 hops —
+the host is re-resolved and every resolved address must be public. Loopback,
+private (RFC 1918), link-local (including the 169.254.16 cloud metadata
+endpoint), and every other reserved range are refused, so a redirect cannot
+steal the fetcher toward an internal destination. `data:` URLs are never
+fetched; they are decoded in place, capped at 4 MiB of URL string (decoded
+content remains bounded by the 25 MiB per-attachment limit), and use the
+`name=`/`filename=` mediatype parameter for the attachment filename.
+
+Deployments that deliberately serve attachments from a private network opt out
+with:
+
+```bash
+MCP_EMAIL_SERVER_ALLOW_PRIVATE_ATTACHMENT_HOSTS=1
+```
+
+The guard re-resolves the host at request time; DNS may change between the
+check and the connection, so treat the check as a policy statement, not a
+sandbox. The caller's URL is never written to the log; only the derived
+filename is.
+
 ## TLS certificate verification
 
 Keep `verify_ssl = true` for remote IMAP and SMTP services. Disabling

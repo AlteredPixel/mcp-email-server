@@ -54,6 +54,19 @@ MAX_IMAP_UID_CHARACTERS = len(str(APPLICATION_LIMITS.maximum_imap_uid))
 UidInput = Annotated[str, Field(max_length=MAX_IMAP_UID_CHARACTERS, pattern=r"^[1-9][0-9]*$")]
 AddressInput = Annotated[str, Field(max_length=APPLICATION_LIMITS.address_bytes)]
 AttachmentPathInput = Annotated[str, Field(max_length=APPLICATION_LIMITS.attachment_path_bytes)]
+AttachmentUrlInput = Annotated[
+    str,
+    Field(
+        max_length=APPLICATION_LIMITS.data_url_bytes,
+        description=(
+            "Attachment URL: an http(s) URL the server downloads (short reference, "
+            f"{APPLICATION_LIMITS.attachment_path_bytes} chars), or a data: URL (base64) carrying the "
+            "file inline (bounded to "
+            f"{APPLICATION_LIMITS.data_url_bytes} chars). Decoded content is capped at "
+            f"{APPLICATION_LIMITS.attachment_bytes} bytes."
+        ),
+    ),
+]
 FlagInput = Annotated[str, Field(max_length=APPLICATION_LIMITS.flag_bytes)]
 AccountDiscoveryResult = Annotated[
     list[AvailableAccount],
@@ -617,6 +630,14 @@ async def send_email(
             description="A list of file paths to attach. Relative paths are resolved against the server process working directory; absolute paths are recommended.",
         ),
     ] = None,
+    attachment_urls: Annotated[
+        list[AttachmentUrlInput] | None,
+        Field(
+            default=None,
+            max_length=APPLICATION_LIMITS.attachments,
+            description="A list of URLs to attach: http(s) URLs are downloaded by the server, and data: URLs carry base64 file content inline. Files and URLs count together towards the attachment limit.",
+        ),
+    ] = None,
     in_reply_to: Annotated[
         str | None,
         Field(
@@ -653,6 +674,7 @@ async def send_email(
                 bcc=tuple(bcc or ()),
                 html=html,
                 attachments=tuple(attachments or ()),
+                attachment_urls=tuple(attachment_urls or ()),
                 in_reply_to=in_reply_to,
                 references=references,
                 reply_to=reply_to,
@@ -810,6 +832,14 @@ async def save_to_mailbox(
             description="A list of file paths to attach. Relative paths are resolved against the server process working directory; absolute paths are recommended.",
         ),
     ] = None,
+    attachment_urls: Annotated[
+        list[AttachmentUrlInput] | None,
+        Field(
+            default=None,
+            max_length=APPLICATION_LIMITS.attachments,
+            description="A list of URLs to attach: http(s) URLs are downloaded by the server, and data: URLs carry base64 file content inline. Files and URLs count together towards the attachment limit.",
+        ),
+    ] = None,
     in_reply_to: Annotated[
         str | None,
         Field(
@@ -847,6 +877,7 @@ async def save_to_mailbox(
                 bcc=tuple(bcc or ()),
                 html=html,
                 attachments=tuple(attachments or ()),
+                attachment_urls=tuple(attachment_urls or ()),
                 in_reply_to=in_reply_to,
                 references=references,
                 flags=tuple(flags) if flags is not None else None,
@@ -909,6 +940,14 @@ async def save_draft(
             description="A list of file paths to attach. Relative paths are resolved against the server process working directory; absolute paths are recommended.",
         ),
     ] = None,
+    attachment_urls: Annotated[
+        list[AttachmentUrlInput] | None,
+        Field(
+            default=None,
+            max_length=APPLICATION_LIMITS.attachments,
+            description="A list of URLs to attach: http(s) URLs are downloaded by the server, and data: URLs carry base64 file content inline. Files and URLs count together towards the attachment limit.",
+        ),
+    ] = None,
     in_reply_to: Annotated[
         str | None,
         Field(
@@ -936,6 +975,7 @@ async def save_draft(
             bcc=tuple(bcc or ()),
             html=html,
             attachments=tuple(attachments or ()),
+            attachment_urls=tuple(attachment_urls or ()),
             in_reply_to=in_reply_to,
             references=references,
         )
