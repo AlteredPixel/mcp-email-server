@@ -308,6 +308,7 @@ Sends a message through the selected account's SMTP server. It supports:
 - To, CC, and BCC recipients.
 - Plain-text or HTML bodies.
 - Attachments from file paths available to the server process. Relative paths use the process working directory; absolute paths are recommended.
+- `attachment_urls`: http(s) URLs downloaded by the server, or data: URLs carrying base64 content inline (see [URL attachments](security.md#url-attachments-and-the-network-guard)). Files and URLs count together towards the attachment limit.
 - `Reply-To`, `In-Reply-To`, and `References` headers.
 
 The tool is always present in the stable MCP catalog. The selected
@@ -463,7 +464,10 @@ explicitly with `send_email`.
 
 Attachments carried into the forward keep the source part's MIME main type,
 subtype, and parameters instead of being coerced into `application/*`. Set
-`include_attachments=false` to forward only the text.
+`include_attachments=false` to forward only the text. The tool does not accept
+caller-supplied attachments or attachment URLs: the source message's parts are
+re-attached by the server, so a direct command carrying caller attachment URLs
+is rejected rather than silently ignored.
 
 Re-attached parts are bounded by the shared application limits: at most 20
 retained parts, 25 MiB per part, and 50 MiB in total. Each size is the
@@ -636,7 +640,14 @@ each; every entry must
 contain exactly one address. Compose requests also allow a 64 KiB UTF-8 subject,
 a 1 MiB UTF-8 body, and 20 attachments. Threading and Reply-To values
 are limited to 64 KiB each. Each attachment path is limited to 4,096 bytes,
-each existing attachment to 25 MiB, and their combined size to 50 MiB. Outbound
+each existing attachment to 25 MiB, and their combined size to 50 MiB. The
+compose tools also accept `attachment_urls` alongside local paths: an http(s)
+URL reference is bounded like a path (4,096 characters), while a data: URL may
+carry the file inline up to 4 MiB of URL string; decoded content stays capped
+at 25 MiB per attachment and files plus URLs count together towards the limit.
+The server fetches http(s) URLs only after account authority and recipient
+policy accept the request, and by default refuses hosts that resolve to
+non-public address space — see [URL attachments](security.md#url-attachments-and-the-network-guard). Outbound
 attachments preserve the inferred MIME main type and subtype (for example,
 `image/png` remains `image/png`) instead of coercing every file to
 `application/*`. Saved messages accept at most 100 flags of 128 bytes each before protocol syntax
